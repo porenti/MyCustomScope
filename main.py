@@ -20,7 +20,7 @@ import keyboard
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-CROSSHAIR_KEYS: list[str] = ["dot", "plus", "plus_dot", "cross", "square", "plus_spaced"]
+CROSSHAIR_KEYS: list[str] = ["dot", "plus", "plus_dot", "cross", "cross_dot", "square", "plus_spaced", "plus_solid"]
 
 DEFAULT_SIZE  = 20
 TOGGLE_HOTKEY = "F6"
@@ -41,8 +41,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "ct_plus":        "Плюс (+)",
         "ct_plus_dot":    "Плюс с точкой",
         "ct_cross":       "Крест (×)",
+        "ct_cross_dot":   "Крест с точкой",
         "ct_square":      "Квадрат",
         "ct_plus_spaced": "Плюс с отступами",
+        "ct_plus_solid":  "Плюс сплошной",
         "monitor_group":  "Монитор",
         "monitor_item":   "Монитор {n}  ({w}×{h})",
         "size_group":     "Размер прицела",
@@ -70,8 +72,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "ct_plus":        "Plus (+)",
         "ct_plus_dot":    "Plus with Dot",
         "ct_cross":       "Cross (×)",
+        "ct_cross_dot":   "Cross with Dot",
         "ct_square":      "Square",
         "ct_plus_spaced": "Plus with Gap",
+        "ct_plus_solid":  "Plus (solid)",
         "monitor_group":  "Monitor",
         "monitor_item":   "Monitor {n}  ({w}×{h})",
         "size_group":     "Crosshair Size",
@@ -181,6 +185,24 @@ class AppSettings:
         return active, hotkey, lang
 
 
+# ── Win32 helpers ─────────────────────────────────────────────────────────────
+
+_user32 = ctypes.windll.user32
+_user32.SetWindowPos.argtypes    = [ctypes.c_void_p, ctypes.c_void_p,
+                                     ctypes.c_int, ctypes.c_int,
+                                     ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+_user32.GetWindowLongW.argtypes  = [ctypes.c_void_p, ctypes.c_int]
+_user32.GetWindowLongW.restype   = ctypes.c_long
+_user32.SetWindowLongW.argtypes  = [ctypes.c_void_p, ctypes.c_int, ctypes.c_long]
+_user32.SetWindowLongW.restype   = ctypes.c_long
+_user32.SetWindowDisplayAffinity.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+_user32.SetWindowDisplayAffinity.restype  = ctypes.c_bool
+try:
+    _dwmapi = ctypes.WinDLL("dwmapi")
+except OSError:
+    _dwmapi = None
+
+
 # ── Thread-safe hotkey forwarder ──────────────────────────────────────────────
 
 class _HotkeySignaler(QObject):
@@ -214,7 +236,6 @@ class CrosshairOverlay(QWidget):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
             | Qt.WindowType.BypassWindowManagerHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -223,7 +244,7 @@ class CrosshairOverlay(QWidget):
     def show_on_screen(self, screen) -> None:
         self.setGeometry(screen.geometry())
         self.show()
-        self._make_click_through()
+        self._setup_win32()
 
     def apply_settings(self, crosshair_type: str, color: QColor, size: int) -> None:
         self.crosshair_type = crosshair_type
@@ -235,11 +256,35 @@ class CrosshairOverlay(QWidget):
         self._brush         = QBrush(color)
         self.update()
 
-    def _make_click_through(self) -> None:
+    def reassert_topmost(self) -> None:
+        if self.isVisible():
+            hwnd = int(self.winId())
+            _user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0013)
+            if _dwmapi:
+                # If EAC cloaked our window via DWM, uncloak it.
+                # DWMWA_CLOAKED=14 (read), DWMWA_CLOAK=13 (write)
+                cloaked = ctypes.c_int(0)
+                _dwmapi.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), 4)
+                if cloaked.value:
+                    zero = ctypes.c_int(0)
+                    _dwmapi.DwmSetWindowAttribute(hwnd, 13, ctypes.byref(zero), 4)
+
+    def _setup_win32(self) -> None:
         try:
             hwnd  = int(self.winId())
-            style = ctypes.windll.user32.GetWindowLongW(hwnd, -20)
-            ctypes.windll.user32.SetWindowLongW(hwnd, -20, style | 0x00080000 | 0x00000020)
+            style = _user32.GetWindowLongW(hwnd, -20)
+            # WS_EX_TRANSPARENT(0x20) | WS_EX_NOACTIVATE(0x8000000)
+            # WS_EX_LAYERED is already set by Qt for WA_TranslucentBackground.
+            _user32.SetWindowLongW(hwnd, -20,
+                                   style | 0x00000020 | 0x08000000)
+            # SWP_FRAMECHANGED(0x0020) | SWP_NOMOVE(0x2) | SWP_NOSIZE(0x1) | SWP_NOACTIVATE(0x10)
+            _user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0033)
+            if _dwmapi:
+                val = ctypes.c_int(1)
+                _dwmapi.DwmSetWindowAttribute(hwnd, 12, ctypes.byref(val), 4)
+            # WDA_EXCLUDEFROMCAPTURE(0x11): places the window in DWM's protected
+            # composition path that renders above DXGI Independent Flip swap chains.
+            _user32.SetWindowDisplayAffinity(hwnd, 0x11)
         except Exception:
             pass
 
@@ -252,7 +297,9 @@ class CrosshairOverlay(QWidget):
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         p  = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        p.fillRect(self.rect(), Qt.GlobalColor.transparent)
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         cx = self.width()  // 2
         cy = self.height() // 2
         s  = self.size
@@ -279,7 +326,7 @@ class CrosshairOverlay(QWidget):
             else:
                 p.fillRect(cx, cy, 1, 1, self.color)
 
-        elif self.crosshair_type == "cross":
+        elif self.crosshair_type in ("cross", "cross_dot"):
             half = s // 2
             gap  = max(2, s // 6)
             d    = int(half * 0.707)
@@ -288,6 +335,11 @@ class CrosshairOverlay(QWidget):
             p.drawLine(cx + dg, cy + dg, cx + d,  cy + d)
             p.drawLine(cx + d,  cy - d,  cx + dg, cy - dg)
             p.drawLine(cx - dg, cy + dg, cx - d,  cy + d)
+            if self.crosshair_type == "cross_dot":
+                r = max(1, self._stroke_w)
+                p.setBrush(self._brush)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.drawEllipse(cx - r, cy - r, r * 2, r * 2)
 
         elif self.crosshair_type == "square":
             half = s // 2
@@ -298,7 +350,53 @@ class CrosshairOverlay(QWidget):
         elif self.crosshair_type == "plus_spaced":
             self._draw_plus_lines(p, cx, cy, s // 2, max(2, s // 5))
 
+        elif self.crosshair_type == "plus_solid":
+            half = s // 2
+            p.drawLine(cx - half, cy, cx + half, cy)
+            p.drawLine(cx, cy - half, cx, cy + half)
+
         p.end()
+
+
+# ── DWM composition anchor ───────────────────────────────────────────────────
+
+class _CompositionAnchor(QWidget):
+    """Forces DWM into Composed mode by keeping a 1×1 opaque HWND_TOPMOST window on screen.
+
+    When a game uses DXGI Independent Flip / Direct Flip, the driver presents
+    frames straight to the display hardware, bypassing DWM entirely.  In that
+    mode our transparent overlay is invisible even though it is HWND_TOPMOST.
+    DWM exits Independent Flip whenever any opaque window must be composited
+    on the same monitor.  This 1×1 black pixel at the bottom-right corner does
+    exactly that with minimal visual impact.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setFixedSize(2, 2)
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(0, 0, 0))
+        p.end()
+
+    def show_on_screen(self, screen) -> None:
+        geo = screen.geometry()
+        self.move(geo.x() + geo.width() - 2, geo.y() + geo.height() - 2)
+        self.show()
+        hwnd = int(self.winId())
+        style = _user32.GetWindowLongW(hwnd, -20)
+        _user32.SetWindowLongW(hwnd, -20, style | 0x08000000)  # WS_EX_NOACTIVATE
+        _user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0033)
+
+    def reassert_topmost(self) -> None:
+        if self.isVisible():
+            _user32.SetWindowPos(int(self.winId()), -1, 0, 0, 0, 0, 0x0013)
 
 
 # ── Settings window ───────────────────────────────────────────────────────────
@@ -609,6 +707,7 @@ class App:
         self.qapp.setWindowIcon(_icon)
 
         self.overlay  = CrosshairOverlay()
+        self.anchor   = _CompositionAnchor()
         self.window   = SettingsWindow()
         self.window.setWindowIcon(_icon)
 
@@ -621,6 +720,16 @@ class App:
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(400)
         self._save_timer.timeout.connect(self._do_save)
+
+        self._topmost_timer = QTimer(self.qapp)
+        self._topmost_timer.timeout.connect(self._reassert_all)
+        self._topmost_timer.start(100)
+
+        # Force repaints at ~30 fps so the crosshair stays visible even if
+        # the game's DWM composition invalidates the window content.
+        self._repaint_timer = QTimer(self.qapp)
+        self._repaint_timer.timeout.connect(self.overlay.update)
+        self._repaint_timer.start(33)
 
         self._connect_signals()
         self._setup_tray(_icon)
@@ -652,6 +761,7 @@ class App:
 
     def _connect_signals(self) -> None:
         self.window.toggle_btn.clicked.connect(self._on_toggle_btn)
+        self.window.compat_btn.clicked.connect(self._on_compat_click)
         self.window.monitor_combo.currentIndexChanged.connect(self._on_monitor_change)
         self.window.hotkey_change_btn.clicked.connect(self._start_hotkey_capture)
         self.window.lang_changed.connect(self._on_lang_changed)
@@ -664,6 +774,10 @@ class App:
 
         self.qapp.aboutToQuit.connect(self._on_quit)
 
+    def _reassert_all(self) -> None:
+        self.overlay.reassert_topmost()
+        self.anchor.reassert_topmost()
+
     def _on_toggle_btn(self, checked: bool) -> None:
         self._set_active(checked)
         self._save()
@@ -673,6 +787,7 @@ class App:
             screens = QApplication.screens()
             if 0 <= index < len(screens):
                 self.overlay.show_on_screen(screens[index])
+                self.anchor.show_on_screen(screens[index])
         self._save()
 
     def _on_setting_changed(self) -> None:
@@ -802,8 +917,10 @@ class App:
             screens = QApplication.screens()
             if 0 <= idx < len(screens):
                 self.overlay.show_on_screen(screens[idx])
+                self.anchor.show_on_screen(screens[idx])
         else:
             self.overlay.hide()
+            self.anchor.hide()
 
     def _toggle(self) -> None:
         self._set_active(not self.active)
