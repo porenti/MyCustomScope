@@ -761,7 +761,6 @@ class App:
 
     def _connect_signals(self) -> None:
         self.window.toggle_btn.clicked.connect(self._on_toggle_btn)
-        self.window.compat_btn.clicked.connect(self._on_compat_click)
         self.window.monitor_combo.currentIndexChanged.connect(self._on_monitor_change)
         self.window.hotkey_change_btn.clicked.connect(self._start_hotkey_capture)
         self.window.lang_changed.connect(self._on_lang_changed)
