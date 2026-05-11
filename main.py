@@ -326,7 +326,7 @@ class CrosshairOverlay(QWidget):
             else:
                 p.fillRect(cx, cy, 1, 1, self.color)
 
-        elif self.crosshair_type in ("cross", "cross_dot"):
+        elif self.crosshair_type == "cross":
             half = s // 2
             gap  = max(2, s // 6)
             d    = int(half * 0.707)
@@ -335,11 +335,20 @@ class CrosshairOverlay(QWidget):
             p.drawLine(cx + dg, cy + dg, cx + d,  cy + d)
             p.drawLine(cx + d,  cy - d,  cx + dg, cy - dg)
             p.drawLine(cx - dg, cy + dg, cx - d,  cy + d)
-            if self.crosshair_type == "cross_dot":
-                r = max(1, self._stroke_w)
-                p.setBrush(self._brush)
-                p.setPen(Qt.PenStyle.NoPen)
-                p.drawEllipse(cx - r, cy - r, r * 2, r * 2)
+
+        elif self.crosshair_type == "cross_dot":
+            half = s // 2
+            r    = max(2, self._stroke_w)
+            gap  = r + self._stroke_w + max(2, s // 10)
+            d    = int(half * 0.707)
+            dg   = int(gap  * 0.707)
+            p.drawLine(cx - d,  cy - d,  cx - dg, cy - dg)
+            p.drawLine(cx + dg, cy + dg, cx + d,  cy + d)
+            p.drawLine(cx + d,  cy - d,  cx + dg, cy - dg)
+            p.drawLine(cx - dg, cy + dg, cx - d,  cy + d)
+            p.setBrush(self._brush)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawEllipse(cx - r, cy - r, r * 2, r * 2)
 
         elif self.crosshair_type == "square":
             half = s // 2
